@@ -1,44 +1,78 @@
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+import logging
 from web3 import Web3
+from web3.exceptions import ContractLogicError
+from src.model import (
+    AddressRequest,
+    AnalyzeProposalRequest,
+    AnalyzeProposalResponse,
+    BalanceResponse,
+    ChatRequest,
+    ChatResponse,
+    CreateProposalRequest,
+    DeleteProposalRequest,
+    ProposalDetailRequest,
+    ProposalHistoryRequest,
+    ProposalHistoryResponse,
+    ProposalResponse,
+    TransactionResponse,
+    VoteRequest,
+    VoteHistoryRequest,
+    VoteHistoryResponse
+)
+from src.utils import initialize_web3
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
+CHAIN_ID = 137
 
-# Connect to the custom chain RPC URL
-WEB3_PROVIDER = "https://5165.rpc.thirdweb.com/7e03b521d3a4923ed34206b134e43261"
-CHAIN_ID = 5165  # Your custom chain's ID
-CONTRACT_ADDRESS = "0x29192C5d95BF89B8Db9e4390Bb175b811277b005"
-CONTRACT_ABI = [{"type":"function","stateMutability":"nonpayable","outputs":[],"name":"createProposal","inputs":[{"type":"string","name":"_title","internalType":"string"},{"type":"string","name":"_description","internalType":"string"}]},{"type":"function","stateMutability":"nonpayable","outputs":[],"name":"deleteProposal","inputs":[{"type":"uint256","name":"_proposalId","internalType":"uint256"}]},{"type":"function","stateMutability":"nonpayable","outputs":[],"name":"executeProposal","inputs":[{"type":"uint256","name":"_proposalId","internalType":"uint256"}]},{"type":"function","stateMutability":"view","outputs":[{"type":"tuple[]","name":"","internalType":"struct VotingDAO.Proposal[]","components":[{"type":"string","name":"title","internalType":"string"},{"type":"string","name":"description","internalType":"string"},{"type":"uint256","name":"voteCount","internalType":"uint256"},{"type":"bool","name":"executed","internalType":"bool"}]}],"name":"getAllProposals","inputs":[]},{"type":"function","stateMutability":"view","outputs":[{"type":"string","name":"title","internalType":"string"},{"type":"string","name":"description","internalType":"string"},{"type":"uint256","name":"voteCount","internalType":"uint256"},{"type":"bool","name":"executed","internalType":"bool"}],"name":"getProposal","inputs":[{"type":"uint256","name":"_proposalId","internalType":"uint256"}]},{"type":"function","stateMutability":"view","outputs":[{"type":"bool","name":"","internalType":"bool"}],"name":"hasVoted","inputs":[{"type":"address","name":"","internalType":"address"},{"type":"uint256","name":"","internalType":"uint256"}]},{"type":"function","stateMutability":"view","outputs":[{"type":"uint256","name":"","internalType":"uint256"}],"name":"proposalCount","inputs":[]},{"type":"function","stateMutability":"view","outputs":[{"type":"string","name":"title","internalType":"string"},{"type":"string","name":"description","internalType":"string"},{"type":"uint256","name":"voteCount","internalType":"uint256"},{"type":"bool","name":"executed","internalType":"bool"}],"name":"proposals","inputs":[{"type":"uint256","name":"","internalType":"uint256"}]},{"type":"function","stateMutability":"nonpayable","outputs":[],"name":"vote","inputs":[{"type":"uint256","name":"_proposalId","internalType":"uint256"}]}]
+# Initialize Web3 and contract
+web3, contract = initialize_web3()
 
-web3 = Web3(Web3.HTTPProvider(WEB3_PROVIDER))
-contract = web3.eth.contract(address=CONTRACT_ADDRESS, abi=CONTRACT_ABI)
-
-# Models
-class CreateProposalRequest(BaseModel):
-    title: str
-    description: str
-    private_key: str
-
-class VoteRequest(BaseModel):
-    proposal_id: int
-    private_key: str
-
-class TransactionResponse(BaseModel):
-    transaction_hash: str
-
-
-# Helper function to sign and send transactions
 def sign_and_send_transaction(tx, private_key):
-    signed_tx = web3.eth.account.sign_transaction(tx, private_key=private_key)
-    tx_hash = web3.eth.send_raw_transaction(signed_tx.raw_transaction)
-    return tx_hash.hex()
+    try:
+        signed_tx = web3.eth.account.sign_transaction(tx, private_key=private_key)
+        tx_hash = web3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        return tx_hash.hex()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Transaction failed: {str(e)}")
 
 
-# Endpoints
-@app.post("/proposals", response_model=TransactionResponse)
+@app.get("/proposals", summary="Get All Proposals")
+async def get_all_proposals():
+    """
+    Retrieve a list of all proposals stored in the contract.
+    """
+    try:
+        proposals_data = contract.functions.getAllProposals().call()
+        proposals = []
+        for i, p in enumerate(proposals_data):
+            # p = (title, description, voteCount, executed, creator)
+            proposals.append({
+                "proposal_id": i,
+                "title": p[0],
+                "description": p[1],
+                "vote_count": p[2],
+                "executed": p[3],
+                "creator": p[4]
+            })
+        return {"proposals": proposals}
+    except ContractLogicError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/proposals", response_model=TransactionResponse, summary="Create Proposal")
 async def create_proposal(request: CreateProposalRequest):
+    """
+    Create a new proposal by providing a title, description, and the creator's private key.
+    """
     account = web3.eth.account.from_key(request.private_key)
-    gas_price = web3.to_wei('1', 'gwei')  # Adjust based on your chain's requirements
+    gas_price = web3.to_wei('50', 'gwei')
 
     tx = contract.functions.createProposal(request.title, request.description).build_transaction({
         "from": account.address,
@@ -52,8 +86,11 @@ async def create_proposal(request: CreateProposalRequest):
     return {"transaction_hash": tx_hash}
 
 
-@app.post("/vote", response_model=TransactionResponse)
+@app.post("/vote", response_model=TransactionResponse, summary="Vote On Proposal")
 async def vote_on_proposal(request: VoteRequest):
+    """
+    Vote on a specific proposal by providing the proposal ID and the voter's private key.
+    """
     account = web3.eth.account.from_key(request.private_key)
     gas_price = web3.to_wei('1', 'gwei')
 
@@ -62,45 +99,137 @@ async def vote_on_proposal(request: VoteRequest):
         "nonce": web3.eth.get_transaction_count(account.address),
         "gas": 2000000,
         "gasPrice": gas_price,
-        "chainId": CHAIN_ID,
+        "chainId": web3.eth.chain_id,
     })
 
     tx_hash = sign_and_send_transaction(tx, request.private_key)
     return {"transaction_hash": tx_hash}
 
-@app.get("/proposals")
-async def get_all_proposals():
+
+@app.post("/proposals/detail", summary="Get Proposal")
+async def get_proposal_detail(request: ProposalDetailRequest):
+    """
+    Retrieve details for a specific proposal by its ID.
+    """
     try:
-        proposal_count = contract.functions.proposalCount().call()  # Fetch total proposal count
-        proposals = []
-
-        for proposal_id in range(proposal_count):
-            # Fetch each proposal's details
-            title, description, vote_count, executed = contract.functions.getProposal(proposal_id).call()
-            proposals.append({
-                "proposal_id": proposal_id,
-                "title": title,
-                "description": description,
-                "vote_count": vote_count,
-                "executed": executed
-            })
-
-        return {"proposals": proposals}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.get("/proposals/{proposal_id}")
-async def get_proposal(proposal_id: int):
-    try:
-        # Fetch details for a specific proposal
-        title, description, vote_count, executed = contract.functions.getProposal(proposal_id).call()
+        title, description, vote_count, executed, creator = contract.functions.getProposal(request.proposal_id).call()
         return {
-            "proposal_id": proposal_id,
+            "proposal_id": request.proposal_id,
             "title": title,
             "description": description,
             "vote_count": vote_count,
-            "executed": executed
+            "executed": executed,
+            "creator": creator
         }
-    except Exception as e:
+    except ContractLogicError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/balance", response_model=BalanceResponse, summary="Get Balance")
+async def get_balance(request: AddressRequest):
+    """
+    Retrieve the ETH balance of a given address.
+    """
+    try:
+        address = Web3.to_checksum_address(request.address)
+        balance_wei = web3.eth.get_balance(address)
+        balance_ether = web3.fromWei(balance_wei, 'ether')
+        return {"balance": str(balance_ether)}
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid Ethereum address")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/vote_history", response_model=VoteHistoryResponse, summary="Get Vote History")
+async def get_vote_history(request: VoteHistoryRequest):
+    """
+    Retrieve the history of proposal IDs that a given address has voted on.
+    """
+    try:
+        address = Web3.to_checksum_address(request.address)
+        proposal_ids = contract.functions.getVoteHistory(address).call()
+        return {"voter": request.address, "voted_proposal_ids": proposal_ids}
+    except ContractLogicError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/proposal_history", response_model=ProposalHistoryResponse, summary="Get Proposal History")
+async def get_proposal_history(request: ProposalHistoryRequest):
+    """
+    Retrieve the history of proposal IDs created by a specific address.
+    """
+    try:
+        address = Web3.to_checksum_address(request.address)
+        proposal_ids = contract.functions.getProposalHistory(address).call()
+        return {"creator": request.address, "proposal_ids": proposal_ids}
+    except ContractLogicError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/proposals/{proposal_id}", response_model=TransactionResponse, summary="Delete Proposal")
+async def delete_proposal(proposal_id: int, request: DeleteProposalRequest):
+    """
+    Delete a proposal by its ID. The requester must be the proposal creator.
+    """
+    if proposal_id != request.proposal_id:
+        raise HTTPException(status_code=400, detail="Mismatch in proposal_id between path and body")
+
+    account = web3.eth.account.from_key(request.private_key)
+    gas_price = web3.to_wei('1', 'gwei')
+
+    try:
+        tx = contract.functions.deleteProposal(proposal_id).build_transaction({
+            "from": account.address,
+            "nonce": web3.eth.get_transaction_count(account.address),
+            "gas": 2000000,
+            "gasPrice": gas_price,
+            "chainId": web3.eth.chain_id,
+        })
+
+        tx_hash = sign_and_send_transaction(tx, request.private_key)
+        return {"transaction_hash": tx_hash}
+    except ContractLogicError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/analyze_proposal", response_model=AnalyzeProposalResponse, summary="Analyze Proposal")
+async def analyze_proposal(request: AnalyzeProposalRequest):
+    """
+    Analyze a proposal's title and description using a custom agent.
+    """
+    from src.agent import analyze_runnable
+    try:
+        analysis = await analyze_runnable.invoke({"title": request.title, "description": request.description})
+        return AnalyzeProposalResponse(analysis=analysis)
+    except Exception as e:
+        logger.error(f"Analysis failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+
+
+@app.post("/chat", response_model=ChatResponse, summary="Chat")
+async def chat(request: ChatRequest):
+    """
+    Chat endpoint that uses a custom agent to respond to user messages with DAO context.
+    """
+    from src.agent import chat_runnable, cached_proposals, cached_vote_history
+    try:
+        # Prepare DAO information from cache
+        dao_info = f"The DAO currently has {len(cached_proposals)} proposals."
+
+        # Fetch user's voting history from cache (if available)
+        vote_history = cached_vote_history.get(request.user_address, [])
+
+        reply = await chat_runnable.invoke({"message": request.message, "dao_info": dao_info, "vote_history": vote_history})
+        return ChatResponse(reply=reply)
+    except Exception as e:
+        logger.error(f"Chat failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
