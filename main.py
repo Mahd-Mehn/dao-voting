@@ -92,7 +92,7 @@ async def vote_on_proposal(request: VoteRequest):
     Vote on a specific proposal by providing the proposal ID and the voter's private key.
     """
     account = web3.eth.account.from_key(request.private_key)
-    gas_price = web3.to_wei('1', 'gwei')
+    gas_price = web3.to_wei('50', 'gwei')
 
     tx = contract.functions.vote(request.proposal_id).build_transaction({
         "from": account.address,
@@ -182,7 +182,7 @@ async def delete_proposal(proposal_id: int, request: DeleteProposalRequest):
         raise HTTPException(status_code=400, detail="Mismatch in proposal_id between path and body")
 
     account = web3.eth.account.from_key(request.private_key)
-    gas_price = web3.to_wei('1', 'gwei')
+    gas_price = web3.to_wei('50', 'gwei')
 
     try:
         tx = contract.functions.deleteProposal(proposal_id).build_transaction({
